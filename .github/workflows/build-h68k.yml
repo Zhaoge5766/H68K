@@ -3,33 +3,39 @@ name: Build H68K
 # =============================================================================
 # 编译 HinLink H68K 的 ImmortalWrt 固件
 #
-#   源码：Beaverfffan/immortalwrt-hinlink-full
-#         这是一棵**已经把 HinLink 适配固化进去**的完整 immortalwrt 源码树
-#         （基于 immortalwrt master，内核 6.18.55），configs/ 下每机型一份
-#         .config，clone 下来就能编，不需要再打补丁。
-#   产物：squashfs / ext4 的 sysupgrade 镜像 + manifest + sha256
-#   去向：GitHub Release + 推送 firmware 分支到 Zhaoge5766/H68K
+#   源码：immortalwrt/immortalwrt（**官方**源码，跟着 master 走）
+#   适配：Beaverfffan/immortalwrt-hinlink（设备适配层，运行时注入）
 #
-# 首次使用请配一个 secret：PUSH_TOKEN
-#   classic PAT 勾 repo；或 fine-grained PAT 对 Zhaoge5766/H68K 授
-#   Contents: Read and write。
-#   如果本工作流就放在 Zhaoge5766/H68K 仓库里，可以不配 —— 下面的
-#   `secrets.PUSH_TOKEN || github.token` 会自动回落到内置 token。
+# 和直接用 Beaverfffan 那棵 "-full" 整树编译的区别：
+#   · 内核、uboot、通用包全部来自官方 immortalwrt，能跟上游更新
+#   · 只注入 H68K 需要的东西：DTS / 机型定义 / board.d 分支 / 3 个内核补丁 /
+#     1 个 u-boot 补丁 / 7 个本地包（风扇、OLED、5G 复位、aic8800 等）
+#   · 注入过程见 scripts/inject-hinlink.py，每一步都带校验，失败就停
+#
+# 产物：sysupgrade 镜像 + manifest + sha256
+# 去向：GitHub Release + 强推 firmware 分支（都推到 Zhaoge5766/H68K）
+#
+# 首次使用若要推到**别的**仓库，需要配 secret PUSH_TOKEN（PAT，Contents: RW）。
+# 本工作流就跑在 Zhaoge5766/H68K 里，所以不配也行 —— 会回落到内置 token。
 # =============================================================================
 
 on:
   workflow_dispatch:
     inputs:
-      full_ref:
-        description: "immortalwrt-hinlink-full 分支/标签"
+      iwrt_ref:
+        description: "官方 immortalwrt 分支/标签"
         required: false
         default: master
+      overlay_ref:
+        description: "适配层（immortalwrt-hinlink）分支/标签"
+        required: false
+        default: main
       devices:
-        description: "要编的机型（空格分隔，可选：h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new，留空=全部）"
+        description: "机型（空格分隔：h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new；留空=只编 h68k-new）"
         required: false
         default: ""
       publish:
-        description: "构建成功后推送到 Zhaoge5766/H68K"
+        description: "构建成功后推送固件"
         type: boolean
         default: true
 
@@ -41,6 +47,10 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/build-h68k.yml"
+      - "scripts/**"
+      - "configs/**"
+      - "diy-part1.sh"
+      - "diy-part2.sh"
 
 permissions:
   contents: write
@@ -49,6 +59,13 @@ concurrency:
   group: h68k-build
   cancel-in-progress: true
 
+env:
+  IWRT_REPO: https://github.com/immortalwrt/immortalwrt.git
+  OVERLAY_REPO: https://github.com/Beaverfffan/immortalwrt-hinlink.git
+  TREE: ${{ github.workspace }}/immortalwrt
+  PUSH_REPO: Zhaoge5766/H68K
+  PUSH_BRANCH: firmware
+
 jobs:
   build:
     name: 编译
@@ -56,176 +73,119 @@ jobs:
     timeout-minutes: 360
 
     env:
-      FULL_REF: ${{ inputs.full_ref || 'master' }}
-      DEVICES: ${{ inputs.devices || 'h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new' }}
-      PUSH_REPO: Zhaoge5766/H68K
-      PUSH_BRANCH: firmware
+      DEVICES: ${{ inputs.devices || 'h68k-new' }}
 
     steps:
-      # ---------------------------------------------------------------------
-      # 磁盘：整棵树 build_dir 能到 10 GB 以上，GitHub 托管 runner 的 / 只有
-      # 14 GB 左右。优先放到 /mnt（runner 上是一块 70 GB 的独立盘），
-      # 放不下再退回 workspace。
-      # ---------------------------------------------------------------------
-      - name: 准备构建目录
+      - name: 释放 Ubuntu 磁盘空间
         run: |
           set -euo pipefail
-          echo "清理前："; df -h / /mnt 2>/dev/null | grep -v Filesystem || true
+          df -h / | tail -1
           sudo rm -rf \
             /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
             /usr/share/swift /usr/lib/jvm 2>/dev/null || true
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
+          sudo apt-get -qq clean
+          df -h / | tail -1
 
-          BUILD_ROOT="$GITHUB_WORKSPACE"
-          if [ -d /mnt ]; then
-            avail=$(df -BG --output=avail /mnt | tail -1 | tr -dc '0-9')
-            if [ "${avail:-0}" -ge 40 ]; then
-              BUILD_ROOT=/mnt/h68k
-              sudo mkdir -p "$BUILD_ROOT"
-              sudo chown -R "$(id -u):$(id -g)" "$BUILD_ROOT"
-            fi
-          fi
-          mkdir -p "$BUILD_ROOT"
-          echo "TREE=$BUILD_ROOT/immortalwrt-hinlink-full" >> "$GITHUB_ENV"
-          echo "OUT=$BUILD_ROOT/out" >> "$GITHUB_ENV"
-          echo "构建目录：$BUILD_ROOT"
-          df -h "$BUILD_ROOT" | tail -1
+      - name: 加载项目文件
+        uses: actions/checkout@v4
 
-      # runner 镜像没预装 pyelftools，u-boot（rockchip）在 prereq 阶段会直接
-      # 报 "u-boot: Please install the Python3 elftools module" 而中断；
-      # 其余几个（libncurses-dev / gcc-multilib / rsync ...）是 OpenWrt 的
-      # 常规主机依赖，一次装全，省得编到一半才发现缺东西。
-      - name: 安装构建依赖
+      # runner 镜像缺 python3-pyelftools 时，u-boot（rockchip）会在 prereq
+      # 阶段直接中断：u-boot: Please install the Python3 elftools module。
+      # 其余是 OpenWrt 常规主机依赖，一次装全，省得编到一半才发现缺东西。
+      - name: 初始化编译环境
         run: |
           set -euo pipefail
           sudo apt-get -qq update
           sudo apt-get -qq -y install \
             build-essential clang flex bison g++ gawk gettext \
             gcc-multilib g++-multilib \
-            libncurses-dev libssl-dev zlib1g-dev libelf-dev \
+            libncurses-dev libssl-dev zlib1g-dev libelf-dev libncurses5 \
             python3-dev python3-setuptools python3-pyelftools \
             rsync swig unzip file wget curl bzip2 patch perl time \
             device-tree-compiler bc qemu-utils
           python3 -c "import elftools, sys; print('pyelftools', elftools.__version__, 'on', sys.version.split()[0])"
+          nproc
 
-      - name: 取源码
+      - name: 设置当前的日期
         run: |
           set -euo pipefail
-          # 仓库 400+ MB，--depth 1 只取最新提交
-          git clone --depth 1 --branch "$FULL_REF" \
-            https://github.com/Beaverfffan/immortalwrt-hinlink-full.git "$TREE"
-          cd "$TREE"
-          echo "SOURCE_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "SOURCE_DATE=$(git log -1 --format=%cs)" >> "$GITHUB_ENV"
-          echo "内核：$(grep -h '^KERNEL_PATCHVER' target/linux/rockchip/Makefile | head -1)"
+          echo "BUILD_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+          echo "BUILD_STAMP=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_ENV"
+          echo "构建日期：$(date -u '+%Y-%m-%d')"
 
-      - name: 更新 feeds
+      - name: 下载官方 ImmortalWrt 源码
+        env:
+          IWRT_REF: ${{ inputs.iwrt_ref || 'master' }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$IWRT_REF" "$IWRT_REPO" "$TREE"
+          cd "$TREE"
+          echo "IWRT_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "官方源码 $IWRT_REF @ $(git rev-parse --short HEAD)"
+          KVER=$(sed -n 's/^KERNEL_PATCHVER:=\s*//p' target/linux/rockchip/Makefile)
+          echo "内核：$KVER $(cat "target/linux/generic/kernel-$KVER" 2>/dev/null | head -1 || true)"
+          # 确认这是官方树、且确实还没有 hinlink 支持（有的话说明上游已合入，
+          # 适配层就该退场了 —— 这时候注入反而是多余的）
+          if ls target/linux/rockchip/patches-*/ 2>/dev/null | grep -qi hinlink; then
+            echo "::warning::官方树里已经出现 hinlink 补丁，适配层可能是多余的了"
+          fi
+
+      # 适配层是"官方源码 + 补丁"结构，不是 git am 能打的那种补丁集，
+      # 必须按它自己的约定注入（board.d 要合并而不是覆盖）。
+      - name: 注入 Beaverfffan 适配层
+        env:
+          OVERLAY_REF: ${{ inputs.overlay_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          OVERLAY_DIR="${{ github.workspace }}/overlay"
+          rm -rf "$OVERLAY_DIR"
+          git clone --depth 1 --branch "$OVERLAY_REF" "$OVERLAY_REPO" "$OVERLAY_DIR"
+          echo "OVERLAY_COMMIT=$(git -C "$OVERLAY_DIR" rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "适配层 $OVERLAY_REF @ $(git -C "$OVERLAY_DIR" rev-parse --short HEAD)"
+          echo
+          python3 "${{ github.workspace }}/scripts/inject-hinlink.py" \
+            --overlay "$OVERLAY_DIR" --tree "$TREE"
+
+      - name: 执行DIY_P1_SH
+        working-directory: ${{ env.TREE }}
+        run: bash "${{ github.workspace }}/diy-part1.sh"
+
+      - name: 更新feeds
         working-directory: ${{ env.TREE }}
         run: |
           set -euo pipefail
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 关键一步（官方 README 明确要求）：
-      # feeds 里有和自己维护的包**同名**的包（fancontrol / luci-app-fancontrol /
-      # luci-app-oled），install -a 会在 package/feeds/*/ 建软链，而 OpenWrt 按
-      # 字母序扫 package/，feeds 晚于 package/beaverfffan 加载 ⇒ 同名包被 feed
-      # 那份**静默覆盖**：编译不报错，但装进固件的是上游版（温控默认关、
-      # OLED 界面拿 eth0 而不是 wwan0）。这里把软链删掉，让本地版胜出。
-      - name: 清理与本地包同名的 feed 包
+      - name: 加载config 执行DIY_P2_SH defconfig
         working-directory: ${{ env.TREE }}
-        run: |
-          set -euo pipefail
-          for d in package/beaverfffan/*/; do
-            [ -d "$d" ] || continue
-            name=$(basename "$d")
-            hit=$(find package/feeds -maxdepth 2 -name "$name" 2>/dev/null || true)
-            if [ -n "$hit" ]; then
-              echo "$hit" | while read -r p; do rm -rf "$p"; echo "  删除冲突软链 $p"; done
-            fi
-          done
+        env:
+          DEVICES: ${{ inputs.devices || 'h68k-new' }}
+          CONFIG_SEED: ${{ github.workspace }}/configs/h68k.config
+        run: bash "${{ github.workspace }}/diy-part2.sh"
 
-      - name: 组装 .config（多机型）
-        working-directory: ${{ env.TREE }}
-        run: |
-          set -euo pipefail
-
-          dev_symbol() {
-            case "$1" in
-              h68k-a-b)      echo hinlink_opc-h68k-a-b ;;
-              h68k-a-b-usb)  echo hinlink_opc-h68k-a-b-usb ;;
-              h68k-c-d-f)    echo hinlink_opc-h68k-c-d-f ;;
-              h68k-c-d-f-usb) echo hinlink_opc-h68k-c-d-f-usb ;;
-              h68k-new)      echo hinlink_opc-h68k-new ;;
-              *) echo "" ;;
-            esac
-          }
-
-          # 用第一个机型的 config 当底板（分区大小、包选择都来自仓库那份）
-          base="$DEVICES"; base="${base%% *}"
-          [ -f "configs/$base.config" ] || { echo "::error::缺少 configs/$base.config"; exit 1; }
-          cp "configs/$base.config" .config
-          echo "底板配置：configs/$base.config"
-
-          for short in $DEVICES; do
-            sym=$(dev_symbol "$short")
-            if [ -z "$sym" ]; then
-              echo "::error::不认识的机型 '$short'"
-              exit 1
-            fi
-            key="CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_${sym}"
-            # .config 里本来就有一行 "# <key> is not set"，改成 =y
-            sed -i "s|^# ${key} is not set|${key}=y|" .config
-            grep -qx "${key}=y" .config || echo "${key}=y" >> .config
-            echo "  选中 $short -> $sym"
-          done
-
-          # 开 ccache：首次编译慢一点，之后每次能省一大截
-          sed -i 's|^# CONFIG_CCACHE is not set|CONFIG_CCACHE=y|' .config
-          grep -q '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
-          # ccache 目录固定到树内，方便跟 actions/cache 对应
-          sed -i "s|^CONFIG_CCACHE_DIR=.*|CONFIG_CCACHE_DIR=\"$PWD/.ccache\"|" .config
-
-          make defconfig
-
-          echo
-          echo "=== 最终选中的机型 ==="
-          grep -E '^CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_hinlink.*=y$' .config || true
-
-          want=$(echo "$DEVICES" | wc -w)
-          got=$(grep -cE '^CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_hinlink.*=y$' .config || true)
-          if [ "$got" -ne "$want" ]; then
-            echo "::error::期望 $want 个机型，实际 $got 个 —— 机型符号没被 kconfig 接受"
-            exit 1
-          fi
-          if ! grep -qx 'CONFIG_PACKAGE_u-boot-hinlink-h68k-rk3568=y' .config; then
-            echo "::error::u-boot 变体 hinlink-h68k-rk3568 没被选中，镜像阶段会缺 u-boot-rockchip.bin"
-            exit 1
-          fi
-          echo "u-boot: hinlink-h68k-rk3568 ✓"
-
+      # 拿不到缓存时 dl/ 里啥都没有，第一次 make download 要下 2~4 GB
       - name: 缓存 dl/ 与 ccache
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.TREE }}/dl
             ${{ env.TREE }}/.ccache
-          key: h68k-${{ env.FULL_REF }}-${{ github.run_id }}
+          key: h68k-${{ env.BUILD_DATE }}-${{ hashFiles('configs/**', 'scripts/**', 'diy-part*.sh') }}
           restore-keys: |
-            h68k-${{ env.FULL_REF }}-
+            h68k-
 
-      # download 失败时不静默放过：多半是主机依赖或某个源码地址不可达，
-      # 硬失败并在上面留完整 make 输出，好定位；否则要等到编译阶段才炸。
-      - name: 下载依赖
+      - name: 下载安装包
         working-directory: ${{ env.TREE }}
         run: |
           set -uo pipefail
           ok=0
           for i in 1 2 3; do
             echo "== 第 $i 次下载 =="
-            if make -j8 download; then ok=1; break; fi
+            if make -j"$(nproc)" download; then ok=1; break; fi
             sleep 20
           done
           if [ "$ok" != "1" ]; then
@@ -245,16 +205,17 @@ jobs:
         working-directory: ${{ env.TREE }}
         run: |
           echo "=========== 错误行 ==========="
-          grep -nE 'ERROR:|Error [0-9]|is missing|No rule to make target|fatal error|undefined reference' build.log | tail -60 || true
+          grep -nE 'ERROR:|Error [0-9]|is missing|No rule to make target|fatal error|undefined reference|patch.*fail' build.log 2>/dev/null | tail -60 || true
           echo
           echo "=========== 日志末尾 ==========="
-          tail -80 build.log || true
+          tail -80 build.log 2>/dev/null || true
 
       - name: 收集固件
         working-directory: ${{ env.TREE }}
         run: |
           set -euo pipefail
           BIN=bin/targets/rockchip/armv8
+          OUT="${{ github.workspace }}/out"
           mkdir -p "$OUT"
           shopt -s nullglob
           found=0
@@ -274,8 +235,9 @@ jobs:
             echo
             echo "| 项 | 值 |"
             echo "| --- | --- |"
-            echo "| 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |"
-            echo "| 源码 | Beaverfffan/immortalwrt-hinlink-full \`${FULL_REF}\` @ \`${SOURCE_COMMIT}\` |"
+            echo "| 构建时间 | ${BUILD_STAMP} |"
+            echo "| 官方源码 | immortalwrt \`${IWRT_COMMIT}\` |"
+            echo "| 适配层 | immortalwrt-hinlink \`${OVERLAY_COMMIT}\` |"
             echo "| 机型 | ${DEVICES} |"
             echo "| run | #${GITHUB_RUN_NUMBER} |"
             echo
@@ -295,7 +257,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: h68k-firmware-${{ github.run_number }}
-          path: ${{ env.OUT }}/*
+          path: ${{ github.workspace }}/out/*
           if-no-files-found: error
           retention-days: 30
 
@@ -305,10 +267,6 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-
-    env:
-      PUSH_REPO: Zhaoge5766/H68K
-      PUSH_BRANCH: firmware
 
     steps:
       - name: 取回构建产物
@@ -323,7 +281,6 @@ jobs:
         run: |
           set -euo pipefail
           TAG="h68k-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
-          # RELEASE.md 只用来当说明文字，不当附件上传
           assets=$(ls out/* | grep -v 'out/RELEASE.md' || true)
           gh release create "$TAG" $assets \
             --repo "$PUSH_REPO" \
@@ -332,6 +289,8 @@ jobs:
           echo "Release: https://github.com/${PUSH_REPO}/releases/tag/${TAG}" \
             >> "$GITHUB_STEP_SUMMARY"
 
+      # 固件分支每次只有一个提交：仓库不会随时间膨胀，
+      # 历史产物都在 Releases 里，main 分支也不受影响。
       - name: 推送到固件分支
         env:
           GH_TOKEN: ${{ secrets.PUSH_TOKEN || github.token }}
@@ -345,9 +304,6 @@ jobs:
           rm -rf repo
           git clone "https://github.com/${PUSH_REPO}.git" repo
           cd repo
-
-          # 固件分支每次只有一个提交：仓库不会随时间膨胀，
-          # 历史产物都在 Releases 里，main 分支也不受影响。
           git checkout --orphan "$PUSH_BRANCH" 2>/dev/null || git checkout -B "$PUSH_BRANCH"
           git rm -rf . >/dev/null 2>&1 || true
 
@@ -358,8 +314,8 @@ jobs:
           cat > README.md <<EOF
           # H68K 固件
 
-          由 GitHub Actions 自动构建：ImmortalWrt + HinLink H68K 适配
-          （源码 [Beaverfffan/immortalwrt-hinlink-full](https://github.com/Beaverfffan/immortalwrt-hinlink-full)）。
+          由 GitHub Actions 自动构建：官方 ImmortalWrt + HinLink 适配层
+          （[Beaverfffan/immortalwrt-hinlink](https://github.com/Beaverfffan/immortalwrt-hinlink)）。
 
           历次产物在 [Releases](https://github.com/${PUSH_REPO}/releases) 里。
 
