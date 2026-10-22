@@ -199,16 +199,72 @@ jobs:
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee build.log
 
+      # 包级别的真实报错不在 build.log 里（-j 并行时 OpenWrt 把每个包的输出
+      # 写进 logs/package/<feed>/<pkg>/compile.txt），所以这里两头都抓：
+      #   1. 打印所有含 error 的 compile.txt
+      #   2. 用 V=s 单编失败的包 —— 此时工具链已经在这个 workspace 编好了，
+      #      只需重建那一个包，几十秒就能把完整报错打到日志里
       - name: 失败摘要
         if: failure()
         continue-on-error: true
         working-directory: ${{ env.TREE }}
         run: |
-          echo "=========== 错误行 ==========="
-          grep -nE 'ERROR:|Error [0-9]|is missing|No rule to make target|fatal error|undefined reference|patch.*fail' build.log 2>/dev/null | tail -60 || true
+          set +e
+          echo "=========== build.log 里的错误行 ==========="
+          grep -nE 'ERROR:|Error [0-9]|is missing|No rule to make target|fatal error|undefined reference' build.log 2>/dev/null | tail -40
+
           echo
-          echo "=========== 日志末尾 ==========="
-          tail -80 build.log 2>/dev/null || true
+          echo "=========== 失败的包 ==========="
+          failed=$(grep -oE "ERROR: [^ ]+ failed to build" build.log 2>/dev/null | awk '{print $2}')
+          echo "${failed:-（build.log 里没抓到，见下方 compile.txt）}"
+
+          echo
+          echo "=========== compile.txt 里的报错 ==========="
+          for f in $(ls logs/package/*/*/compile.txt 2>/dev/null); do
+            if grep -qiE "error|Error [0-9]|No such file|Permission denied" "$f"; then
+              echo "----- $f -----"
+              grep -nE -i "error|Error [0-9]|No such file|Permission denied|Hunk .* FAILED|patch" "$f" | tail -25
+            fi
+          done
+
+          echo
+          echo "=========== 逐个包的 compile.txt 末尾（有内容的才打）==========="
+          for f in $(ls logs/package/*/*/compile.txt 2>/dev/null); do
+            [ -s "$f" ] || continue
+            echo "----- $f (最后 15 行) -----"
+            tail -15 "$f"
+          done
+
+      - name: 定位失败包（V=s 重编，工具链已就绪）
+        if: failure()
+        continue-on-error: true
+        working-directory: ${{ env.TREE }}
+        run: |
+          set +e
+          failed=$(grep -oE "ERROR: [^ ]+ failed to build" build.log 2>/dev/null | awk '{print $2}' | head -1)
+          if [ -z "$failed" ]; then
+            echo "没解析出失败包名，跳过"
+            exit 0
+          fi
+          # 日志里已经是完整路径（package/beaverfffan/aic8800），别再补 package/
+          case "$failed" in
+            package/*|feeds/*) target="$failed/compile" ;;
+            *)                 target="package/$failed/compile" ;;
+          esac
+          echo ">>> 用 V=s 重编 $target（工具链已在，只重编这一个包）"
+          make "$target" V=s -j1 2>&1 | tail -150
+
+      - name: 上传失败日志
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            ${{ env.TREE }}/logs
+            ${{ env.TREE }}/build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 收集固件
         working-directory: ${{ env.TREE }}
