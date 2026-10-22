@@ -1,0 +1,15 @@
+# 本地工作目录（会话数据、记忆），不进仓库
+.workbuddy/
+
+# 编译相关，万一有人在本地跑了 make
+bin/
+build_dir/
+staging_dir/
+tmp/
+dl/
+.ccache/
+*.log
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
