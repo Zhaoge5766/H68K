@@ -22,6 +22,7 @@
    静默跳过的后果是固件编出来了但没有网络配置，比编译失败更难查。
 """
 import argparse
+import glob
 import io
 import os
 import re
@@ -363,6 +364,25 @@ def step_kconfig(ovl, tree):
 # =====================================================================
 # 6. 本地包 package/beaverfffan
 # =====================================================================
+def tree_pkg_names(tree):
+    """扫出树里已有的 PKG_NAME -> 目录，用于识别"上游已经收录了同名包"。"""
+    found = {}
+    skip = os.path.join(tree, "package", "beaverfffan")
+    pats = ("package/*/*/Makefile", "package/*/*/*/Makefile")
+    for pat in pats:
+        for mk in glob.glob(os.path.join(tree, pat)):
+            d = os.path.dirname(mk)
+            if d == skip or d.startswith(skip + os.sep):
+                continue          # 我们自己要放的位置，不算
+            try:
+                m = re.search(r"^PKG_NAME\s*:?=\s*(\S+)", rd(mk), re.M)
+            except (UnicodeDecodeError, OSError):
+                continue
+            if m:
+                found.setdefault(m.group(1), d)
+    return found
+
+
 def step_packages(ovl, tree):
     src = os.path.join(ovl, "package/beaverfffan")
     if not os.path.isdir(src):
@@ -371,21 +391,44 @@ def step_packages(ovl, tree):
     dst = os.path.join(tree, "package/beaverfffan")
     if os.path.isdir(dst):
         shutil.rmtree(dst)          # 整目录重建：避免改名后旧文件残留
-    n = 0
-    for root, _dirs, files in os.walk(src):
-        rel = os.path.relpath(root, src)
-        od = dst if rel == "." else os.path.join(dst, rel)
-        os.makedirs(od, exist_ok=True)
-        for f in files:
-            # init.d / uci-defaults / libexec 里的脚本要可执行，
-            # 否则装进固件后 OpenWrt 启动时会跳过它们
-            relposix = (rel.replace(os.sep, "/") + "/" + f)
-            exec_bit = any(k in relposix for k in
-                           ("etc/init.d/", "etc/uci-defaults/", "usr/libexec/", "hotplug.d/"))
-            copy_lf(os.path.join(root, f), os.path.join(od, f), exec_bit=exec_bit)
-            n += 1
-    pkgs = sorted(d for d in os.listdir(dst) if os.path.isdir(os.path.join(dst, d)))
-    log("  packages  %d 个文件 / %d 个包：%s" % (n, len(pkgs), ", ".join(pkgs)))
+    os.makedirs(dst, exist_ok=True)
+
+    # ★ 上游会不断把适配层里的包合进自己的树（aic8800 就是这样）。
+    #   两处同名包 = 同一个 PKG_NAME、同一个 build_dir，互相踩，
+    #   报错还是 "package/xxx failed to build"，看不出是重复导致的。
+    #   所以按 PKG_NAME 查一遍：树里已有的一律跳过，用上游那份。
+    existing = tree_pkg_names(tree)
+    copied, skipped = [], []
+    for name in sorted(os.listdir(src)):
+        sp = os.path.join(src, name)
+        if not os.path.isdir(sp):
+            continue
+        mk = os.path.join(sp, "Makefile")
+        pkg = None
+        if os.path.isfile(mk):
+            m = re.search(r"^PKG_NAME\s*:?=\s*(\S+)", rd(mk), re.M)
+            pkg = m.group(1) if m else name
+        if pkg and pkg in existing:
+            skipped.append("%s（上游已有：%s）" % (name, os.path.relpath(existing[pkg], tree)))
+            continue
+
+        n = 0
+        for root, _dirs, files in os.walk(sp):
+            rel = os.path.relpath(root, sp)
+            od = os.path.join(dst, name) if rel == "." else os.path.join(dst, name, rel)
+            os.makedirs(od, exist_ok=True)
+            for f in files:
+                relposix = (rel.replace(os.sep, "/") + "/" + f)
+                exec_bit = any(k in relposix for k in
+                               ("etc/init.d/", "etc/uci-defaults/", "usr/libexec/", "hotplug.d/"))
+                copy_lf(os.path.join(root, f), os.path.join(od, f), exec_bit=exec_bit)
+                n += 1
+        copied.append("%s(%d)" % (name, n))
+
+    log("  packages  注入 %s" % ", ".join(copied))
+    if skipped:
+        for s in skipped:
+            log("  packages  跳过 %s" % s)
 
 
 # =====================================================================
