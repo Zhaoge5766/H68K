@@ -67,6 +67,13 @@ for short in $DEVICES; do
 		exit 1
 	fi
 	key="CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_${sym}"
+	# 机型必须先出现在 armv8.mk 的 TARGET_DEVICES 里，否则 kconfig 压根看不见
+	# 这个符号，defconfig 会把我们写进去的那行当未知符号丢掉（症状：defconfig
+	# 不报错，但一个机型都没选中）。这里提前一步拦下来。
+	if ! grep -qE "^TARGET_DEVICES \+=.*\b${sym}\b" target/linux/rockchip/image/armv8.mk; then
+		echo "::error::$sym 没有 TARGET_DEVICES 注册（适配层注入不完整）"
+		exit 1
+	fi
 	# 种子里本来就有这一行（注释形态），直接改成 y
 	sed -i "s|^# ${key} is not set|${key}=y|" .config
 	grep -qx "${key}=y" .config || echo "${key}=y" >> .config
@@ -95,6 +102,12 @@ got=$(grep -cE '^CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_hinlink.*=y$' .confi
 if [ "$got" -ne "$want" ]; then
 	echo "::error::期望 $want 个机型，实际 $got 个 —— 机型符号没被 kconfig 接受"
 	echo "（通常是适配层没注入成功，或机型名改了）"
+	echo "--- .config 里的 target 相关行 ---"
+	grep -E '^CONFIG_TARGET_rockchip|^# CONFIG_TARGET_rockchip|^CONFIG_TARGET_MULTI_PROFILE' .config | head -10 || true
+	echo "--- .config 里 device 符号计数 ---"
+	grep -cE '^CONFIG_TARGET_DEVICE_' .config || true
+	echo "--- armv8.mk 里的注册行 ---"
+	grep -cE '^TARGET_DEVICES \+= hinlink' target/linux/rockchip/image/armv8.mk || true
 	exit 1
 fi
 

@@ -150,8 +150,20 @@ def step_armv8_mk(ovl, tree):
     if not os.path.isfile(tgt_mk):
         die("官方树里没有 target/linux/rockchip/image/armv8.mk（内核版本/目录结构变了？）")
 
-    blocks = dict(parse_devices(rd(ovl_mk)))
+    ovl_text = rd(ovl_mk)
+    blocks = dict(parse_devices(ovl_text))
     official = {n for n, _ in parse_devices(rd(tgt_mk))}
+
+    # ★ 光有 `define Device/x` 不够 —— include/image.mk 只遍历 TARGET_DEVICES：
+    #     $(foreach device,$(TARGET_DEVICES),$(call Device,$(device)))
+    #   少了 `TARGET_DEVICES += x` 这行，机型压根不会出现在 menuconfig 里，
+    #   `.config` 里的 CONFIG_TARGET_DEVICE_... 会被 kconfig 当未知符号丢掉，
+    #   症状是 defconfig 能过、但一个机型都没选中。
+    regs = []
+    for line in ovl_text.splitlines():
+        m = re.match(r"^TARGET_DEVICES\s*\+=\s*(.+?)\s*$", line)
+        if m:
+            regs.append(m.group(1).split())
 
     # H68K 五个机型 + 递归解析它们引用的 $(Device/xxx)
     keep, todo = [], list(H68K_DEVICES)
@@ -168,19 +180,39 @@ def step_armv8_mk(ovl, tree):
             if ref not in keep:
                 todo.append(ref)
 
-    # 按适配层原文件顺序输出，保持可读性（也保证基座先于引用者定义 —— make 是
-    # 顺序求值的，device 块里用 $(Device/x) 时 x 必须已经定义过）
+    # 按适配层原文件顺序输出，保证基座先于引用者定义 —— make 是顺序求值的，
+    # device 块里用 $(Device/x) 时 x 必须已经定义过
     order = [n for n in blocks if n in keep]
-    missing = [n for n in keep if n not in order]
-    if missing:
-        die("内部错误，未排到顺序：%s" % missing)
+    if len(order) != len(keep):
+        die("内部错误：有序表与保留集不一致")
 
-    body = "\n".join(blocks[n].rstrip("\n") + "\n" for n in order)
+    keep_set = set(order)
+    reg_out = []
+    for names in regs:
+        kept = [n for n in names if n in keep_set]
+        if kept:
+            reg_out.append("TARGET_DEVICES += %s" % " ".join(kept))
+
+    # 每个要编的机型都必须有注册行，否则它不会出现在 target 的机型列表里
+    registered = {n for names in regs for n in names}
+    miss = [d for d in H68K_DEVICES if d not in registered]
+    if miss:
+        die("适配层里这些机型没有 TARGET_DEVICES 注册：%s" % ", ".join(miss))
+
+    body = "\n".join(blocks[n].rstrip("\n") for n in order)
+    body += "\n\n" + "\n".join(reg_out)
 
     text = strip_block(rd(tgt_mk), MK_BEGIN, MK_END).rstrip("\n")
     text += "\n\n%s\n%s\n%s\n" % (MK_BEGIN, body, MK_END)
     wr(tgt_mk, text)
-    log("  armv8.mk  注入 %d 个 device 块：%s" % (len(order), ", ".join(order)))
+    log("  armv8.mk  %d 个 device 块 + %d 条注册：%s"
+        % (len(order), len(reg_out), ", ".join(order)))
+
+    # 自检：注册行必须真的落到文件里
+    written = rd(tgt_mk)
+    for d in H68K_DEVICES:
+        if not re.search(r"^TARGET_DEVICES \+=.*\b%s\b" % re.escape(d), written, re.M):
+            die("%s 的 TARGET_DEVICES 注册没写进去" % d)
 
     # 每个 H68K 机型的 DEVICE_DTS 必须真的存在，否则会到 image 阶段才报错
     dts_dir = os.path.join(tree, "target/linux/rockchip/files/arch/arm64/boot/dts/rockchip")
