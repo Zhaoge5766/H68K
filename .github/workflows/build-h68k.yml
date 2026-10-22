@@ -93,6 +93,23 @@ jobs:
           echo "构建目录：$BUILD_ROOT"
           df -h "$BUILD_ROOT" | tail -1
 
+      # runner 镜像没预装 pyelftools，u-boot（rockchip）在 prereq 阶段会直接
+      # 报 "u-boot: Please install the Python3 elftools module" 而中断；
+      # 其余几个（libncurses-dev / gcc-multilib / rsync ...）是 OpenWrt 的
+      # 常规主机依赖，一次装全，省得编到一半才发现缺东西。
+      - name: 安装构建依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get -qq update
+          sudo apt-get -qq -y install \
+            build-essential clang flex bison g++ gawk gettext \
+            gcc-multilib g++-multilib \
+            libncurses-dev libssl-dev zlib1g-dev libelf-dev \
+            python3-dev python3-setuptools python3-pyelftools \
+            rsync swig unzip file wget curl bzip2 patch perl time \
+            device-tree-compiler bc qemu-utils
+          python3 -c "import elftools, sys; print('pyelftools', elftools.__version__, 'on', sys.version.split()[0])"
+
       - name: 取源码
         run: |
           set -euo pipefail
@@ -199,6 +216,8 @@ jobs:
           restore-keys: |
             h68k-${{ env.FULL_REF }}-
 
+      # download 失败时不静默放过：多半是主机依赖或某个源码地址不可达，
+      # 硬失败并在上面留完整 make 输出，好定位；否则要等到编译阶段才炸。
       - name: 下载依赖
         working-directory: ${{ env.TREE }}
         run: |
@@ -209,7 +228,10 @@ jobs:
             if make -j8 download; then ok=1; break; fi
             sleep 20
           done
-          [ "$ok" = "1" ] || echo "::warning::有依赖没下全，编译阶段会再试一次"
+          if [ "$ok" != "1" ]; then
+            echo "::error::依赖下载连续失败 3 次，报错见上方 make 输出"
+            exit 1
+          fi
 
       - name: 编译固件
         working-directory: ${{ env.TREE }}

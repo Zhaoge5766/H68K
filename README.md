@@ -98,6 +98,17 @@ make -j$(nproc)
 
 产物在 `bin/targets/rockchip/armv8/`。
 
+主机依赖里 **`python3-pyelftools` 不能少**：u-boot（rockchip）在 `make prereq`
+阶段会检查它，缺了直接中断，报错是
+`u-boot: Please install the Python3 elftools module`。Debian/Ubuntu：
+
+```sh
+sudo apt install build-essential clang flex bison g++ gawk gettext \
+  gcc-multilib g++-multilib libncurses-dev libssl-dev zlib1g-dev \
+  python3-dev python3-setuptools python3-pyelftools rsync swig unzip \
+  file wget bzip2 patch perl time device-tree-compiler bc
+```
+
 ## 两个容易踩的坑
 
 **1. feeds 同名包会静默覆盖本地包。**
