@@ -1,7 +1,7 @@
 name: Build H68K
 
 # =============================================================================
-# 编译 HinLink H68K 的 ImmortalWrt 固件
+# 编译 HinLink H68K **全系**（5 个变体）的 ImmortalWrt 固件
 #
 #   源码：immortalwrt/immortalwrt（**官方**源码，跟着 master 走）
 #   适配：Beaverfffan/immortalwrt-hinlink（设备适配层，运行时注入）
@@ -12,7 +12,11 @@ name: Build H68K
 #     1 个 u-boot 补丁 / 7 个本地包（风扇、OLED、5G 复位、aic8800 等）
 #   · 注入过程见 scripts/inject-hinlink.py，每一步都带校验，失败就停
 #
-# 产物：sysupgrade 镜像 + manifest + sha256
+# 机型：h68k-a-b / a-b-usb / c-d-f / c-d-f-usb / new（共用同一份内核和
+#   u-boot 变体 hinlink-h68k-rk3568，多编一个机型只多拼一次镜像）
+# 插件：passwall2 / nikki / openclash / diskman（feed 与依赖见 diy-part1.sh）
+#
+# 产物：5 个机型的 sysupgrade 镜像 + manifest + sha256
 # 去向：GitHub Release + 强推 firmware 分支（都推到 Zhaoge5766/H68K）
 #
 # 首次使用若要推到**别的**仓库，需要配 secret PUSH_TOKEN（PAT，Contents: RW）。
@@ -31,7 +35,11 @@ on:
         required: false
         default: main
       devices:
-        description: "机型（空格分隔：h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new；留空=只编 h68k-new）"
+        description: "机型（空格分隔：h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new；留空=全系 5 个）"
+        required: false
+        default: ""
+      plugins:
+        description: "插件（空格分隔：passwall2 nikki openclash diskman；留空=全系 4 个，填 none 则一个都不加）"
         required: false
         default: ""
       publish:
@@ -70,10 +78,17 @@ jobs:
   build:
     name: 编译
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    # 全系 5 个机型 + 4 个插件（含 ruby / sing-box / xray / mihomo 的 Go 编译），
+    # 冷缓存首次大约 2.5~3.5 小时，给到 7 小时兜底
+    timeout-minutes: 420
 
     env:
-      DEVICES: ${{ inputs.devices || 'h68k-new' }}
+      # H68K 全系 5 个变体。无后缀 = SATA，-usb = USB3.0（RK3568 上 sata0 与
+      # USB3.0 抢同一颗 combphy0，硬件二选一，只能拆成两个 target）。
+      # 五个机型共用同一份内核 + 同一份 u-boot 变体（hinlink-h68k-rk3568），
+      # 多编一个机型只是多拼一次镜像，不重编工具链。
+      DEVICES: ${{ inputs.devices || 'h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new' }}
+      PLUGINS: ${{ inputs.plugins || 'passwall2 nikki openclash diskman' }}
 
     steps:
       - name: 释放 Ubuntu 磁盘空间
@@ -163,7 +178,8 @@ jobs:
       - name: 加载config 执行DIY_P2_SH defconfig
         working-directory: ${{ env.TREE }}
         env:
-          DEVICES: ${{ inputs.devices || 'h68k-new' }}
+          DEVICES: ${{ inputs.devices || 'h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new' }}
+          PLUGINS: ${{ inputs.plugins || 'passwall2 nikki openclash diskman' }}
           CONFIG_SEED: ${{ github.workspace }}/configs/h68k.config
         run: bash "${{ github.workspace }}/diy-part2.sh"
 
@@ -285,9 +301,27 @@ jobs:
             ls -l "$BIN" || true
             exit 1
           fi
+
+          # 每个机型都要有镜像。注意 h68k-a-b 是 h68k-a-b-usb 的前缀，所以
+          # 只认 `hinlink_opc-<机型>-<镜像类型>` 这种完整形态，不能用前缀匹配，
+          # 否则 a-b 会把 a-b-usb 的产物也算进来、掩盖真正缺的那个。
+          echo
+          echo "=== 逐机型核对 ==="
+          miss=""
+          for d in $DEVICES; do
+            short=${d#hinlink_opc-}
+            n=$(ls -1 "$OUT" | grep -cE "hinlink_opc-${short}-(initramfs|ext4|squashfs|factory)" || true)
+            printf '  %-16s %s\n' "$short" "$n 个镜像"
+            [ "$n" -gt 0 ] || miss="$miss $short"
+          done
+          if [ -n "$miss" ]; then
+            echo "::error::这些机型没有产物：${miss# }"
+            exit 1
+          fi
+
           ( cd "$OUT" && sha256sum * > sha256sums.txt )
           {
-            echo "## HinLink H68K · ImmortalWrt"
+            echo "## HinLink H68K 全系 · ImmortalWrt"
             echo
             echo "| 项 | 值 |"
             echo "| --- | --- |"
@@ -295,6 +329,7 @@ jobs:
             echo "| 官方源码 | immortalwrt \`${IWRT_COMMIT}\` |"
             echo "| 适配层 | immortalwrt-hinlink \`${OVERLAY_COMMIT}\` |"
             echo "| 机型 | ${DEVICES} |"
+            echo "| 插件 | ${PLUGINS:-无} |"
             echo "| run | #${GITHUB_RUN_NUMBER} |"
             echo
             echo "### 产物"
@@ -302,10 +337,23 @@ jobs:
             ( cd "$OUT" && ls -1 )
             echo '```'
             echo
+            echo "### 机型对照"
+            echo
+            echo "| 文件名里的机型 | 机器 |"
+            echo "| --- | --- |"
+            echo "| \`hinlink_opc-h68k-a-b\` | A/B 板（2022，双千兆 2 口）+ SATA |"
+            echo "| \`hinlink_opc-h68k-a-b-usb\` | A/B 板，USB3.0（SATA 与 USB3.0 二选一） |"
+            echo "| \`hinlink_opc-h68k-c-d-f\` | C/D/F 板（2022~2023.4，四网口）+ SATA |"
+            echo "| \`hinlink_opc-h68k-c-d-f-usb\` | C/D/F 板，USB3.0 |"
+            echo "| \`hinlink_opc-h68k-new\` | 新机器（2023 末~2024，SATA + USB3.0 可同时用） |"
+            echo
             echo "刷机："
             echo "- 已在同款固件上：\`sysupgrade -n xxx-squashfs-sysupgrade.img.gz\`（LuCI 里直接升级也行）"
             echo "- 原厂固件首次刷：用 \`-factory.img.gz\`，按机型走线刷 / TF 卡刷"
             echo "- 首次进系统：LAN 口 \`192.168.100.1\`，无密码"
+            echo
+            echo "插件入口（LuCI）：服务 → PassWall 2 / Nikki / OpenClash；系统 → 磁盘管理。"
+            echo "OpenClash 与 PassWall 2 / Nikki 都会接管 DNS 与 nftables，**同时只开一个**。"
           } > "$OUT/RELEASE.md"
           ls -lh "$OUT"
 
@@ -368,10 +416,13 @@ jobs:
           cp ../out/* "firmware/$STAMP/"
 
           cat > README.md <<EOF
-          # H68K 固件
+          # H68K 固件（全系）
 
           由 GitHub Actions 自动构建：官方 ImmortalWrt + HinLink 适配层
           （[Beaverfffan/immortalwrt-hinlink](https://github.com/Beaverfffan/immortalwrt-hinlink)）。
+
+          机型：h68k-a-b / a-b-usb / c-d-f / c-d-f-usb / new
+          插件：PassWall 2 / Nikki / OpenClash / DiskMan（三个代理同时只开一个）
 
           历次产物在 [Releases](https://github.com/${PUSH_REPO}/releases) 里。
 

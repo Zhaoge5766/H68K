@@ -4,23 +4,32 @@
 #
 # 位置：./scripts/feeds update -a && ./scripts/feeds install -a → 本脚本
 #
-# 它做四件事：
+# 它做五件事：
 #   1. 删掉与本地包同名的 feed 软链（详见下方注释，这步不能省）
 #   2. 用 configs/h68k.config 作种子
 #   3. 按 $DEVICES 把机型符号打开
-#   4. make defconfig，并校验机型数 / u-boot 变体
+#   4. 按 $PLUGINS 把插件包打开（含依赖校验）
+#   5. make defconfig，并校验机型数 / u-boot 变体 / 插件是否真被接受
 #
 # 环境变量：
-#   DEVICES    空格分隔的机型短名，默认 "h68k-new"
-#   CONFIG_SEED 种子配置路径
+#   DEVICES      空格分隔的机型短名，默认全系 5 个
+#   PLUGINS      空格分隔的插件短名，默认 passwall2 nikki openclash diskman
+#                （给空串 = 一个插件都不加）
+#   CONFIG_SEED  种子配置路径
 # =====================================================================
 set -euo pipefail
 
-DEVICES="${DEVICES:-h68k-new}"
+DEVICES="${DEVICES-h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new}"
+PLUGINS="${PLUGINS-passwall2 nikki openclash diskman}"
+# 给 none / off 就是"一个都不加"，省得为了"不加插件"去记一个空串怎么填
+case "$PLUGINS" in none|no|off|-) PLUGINS="" ;; esac
 CONFIG_SEED="${CONFIG_SEED:-configs/h68k.config}"
+
+[ -n "$DEVICES" ] || { echo "::error::DEVICES 是空的，一个机型都没选中"; exit 1; }
 
 echo "== DIY-P2 =="
 echo "   机型：$DEVICES"
+echo "   插件：${PLUGINS:-（无）}"
 echo "   种子：$CONFIG_SEED"
 
 # ---------------------------------------------------------------- 1
@@ -74,9 +83,8 @@ for short in $DEVICES; do
 		echo "::error::$sym 没有 TARGET_DEVICES 注册（适配层注入不完整）"
 		exit 1
 	fi
-	# 种子里本来就有这一行（注释形态），直接改成 y
-	sed -i "s|^# ${key} is not set|${key}=y|" .config
-	grep -qx "${key}=y" .config || echo "${key}=y" >> .config
+	sed -i "/^${key}=/d;/^# ${key}[= ]/d" .config
+	echo "${key}=y" >> .config
 	want=$((want + 1))
 	echo "   选中 $short -> $sym"
 done
@@ -91,6 +99,77 @@ if grep -q '^CONFIG_CCACHE=y' .config; then
 fi
 
 # ---------------------------------------------------------------- 4
+# 插件短名 -> 需要打开的 CONFIG_PACKAGE_* 列表
+#
+#   nikki 那三个都要写：luci-app-nikki 是界面，nikki 是后端脚本，mihomo-meta
+#   是内核。链路上 nikki 只写 `+mihomo`，而 mihomo 是**虚拟包**（由
+#   mihomo-meta / mihomo-alpha 提供，两者 CONFLICTS），虚拟包不能被 =y，
+#   必须显式选一个真实提供者，否则 nikki 的依赖判定失败、包会被静默丢掉。
+plugin_pkgs() {
+	case "$1" in
+		passwall2) echo "luci-app-passwall2" ;;
+		nikki)     echo "luci-app-nikki nikki mihomo-meta" ;;
+		openclash) echo "luci-app-openclash" ;;
+		diskman)   echo "luci-app-diskman" ;;
+		*)         echo "" ;;
+	esac
+}
+
+# 包是否真的装进了树里。三种位置都要看：
+#   package/feeds/<feed>/<name>  feed 包
+#   package/<group>/<name>       核心包，如 package/utils/e2fsprogs
+#   package/<name>               核心包，如 package/base-files
+# ⚠️ 不能只写 package/*/<name> —— 那会把 package/feeds/<name> 这个**feed 目录**
+#    本身当成包（feed 名和包名撞的时候，比如 feed 叫 nikki、包也叫 nikki），
+#    结果是"包明明没装上却检查通过"。
+pkg_dir() {
+	for d in package/feeds/*/"$1" package/*/*/"$1" package/"$1"; do
+		if [ -d "$d" ]; then
+			echo "$d"
+			return 0
+		fi
+	done
+	return 1
+}
+
+echo "-- 打开插件"
+wanted_pkgs=""
+for plug in $PLUGINS; do
+	pkgs=$(plugin_pkgs "$plug")
+	if [ -z "$pkgs" ]; then
+		echo "::error::不认识的插件 '$plug'（可选：passwall2 nikki openclash diskman）"
+		exit 1
+	fi
+	for p in $pkgs; do
+		if ! d=$(pkg_dir "$p"); then
+			echo "::error::树里找不到包 $p（插件 $plug 需要它）"
+			echo "  可能原因：diy-part1.sh 里没加对应的 feed，或 feed 名写错"
+			exit 1
+		fi
+		sed -i "/^CONFIG_PACKAGE_${p}=/d;/^# CONFIG_PACKAGE_${p}[= ]/d" .config
+		echo "CONFIG_PACKAGE_${p}=y" >> .config
+		wanted_pkgs="$wanted_pkgs $p"
+		echo "   插件 $plug -> $p  ($d)"
+	done
+done
+wanted_pkgs="${wanted_pkgs# }"
+
+# passwall2 的 SSR 客户端开关 `default y` 会 select shadowsocksr-libev-ssr-*，
+# 而官方 feed 里没有 shadowsocksr-libev（只有 openwrt-passwall-packages 有，
+# 那个 feed 不能加，见 diy-part1.sh）。select 一个不存在的符号会让 kconfig
+# 报怪问题，干脆显式关掉 —— 少一个 SSR 协议，其余照旧。
+case " $PLUGINS " in
+	*" passwall2 "*)
+		if ! pkg_dir shadowsocksr-libev >/dev/null; then
+			key='CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ShadowsocksR_Libev_Client'
+			sed -i "/^${key}=/d;/^# ${key}[= ]/d" .config
+			echo "# ${key} is not set" >> .config
+			echo "   passwall2：feed 里没有 shadowsocksr-libev，关掉 SSR 客户端支持"
+		fi
+		;;
+esac
+
+# ---------------------------------------------------------------- 5
 echo "-- make defconfig"
 make defconfig
 
@@ -116,4 +195,43 @@ if ! grep -qx 'CONFIG_PACKAGE_u-boot-hinlink-h68k-rk3568=y' .config; then
 	exit 1
 fi
 
-echo "-- 校验通过：$got 个机型 + u-boot hinlink-h68k-rk3568"
+# dnsmasq 两条并存 = 镜像阶段文件冲突（/usr/sbin/dnsmasq 装两次）。
+# 机型是 DEVICE_TYPE=router，默认包集里本来就是 dnsmasq-full，正常不会撞；
+# 撞了说明有包把 plain dnsmasq 拉进来了，留 dnsmasq-full（openclash /
+# passwall2 都依赖它的 ipset / nftset 能力）。
+if grep -qx 'CONFIG_PACKAGE_dnsmasq=y' .config && grep -qx 'CONFIG_PACKAGE_dnsmasq-full=y' .config; then
+	echo "::warning::dnsmasq 与 dnsmasq-full 同时选中，关掉 plain dnsmasq"
+	sed -i 's|^CONFIG_PACKAGE_dnsmasq=y|# CONFIG_PACKAGE_dnsmasq is not set|' .config
+fi
+
+# 插件校验：defconfig 对"依赖不满足"的包是**静默丢弃**（不报错，只是变成
+# "# ... is not set"），所以必须回头确认一遍。
+missing=""
+for p in $wanted_pkgs; do
+	grep -qx "CONFIG_PACKAGE_${p}=y" .config || missing="$missing $p"
+done
+if [ -n "$missing" ]; then
+	echo "::error::这些包没被 kconfig 接受：${missing# }"
+	for p in $missing; do
+		echo "--- $p ---"
+		if grep -qx "config PACKAGE_${p}" tmp/.config-package.in 2>/dev/null; then
+			echo "符号存在 ⇒ 依赖没满足，它的依赖条件："
+			awk -v s="config PACKAGE_${p}" '
+				$0 == s { f = 1 }
+				f && /depends on/ { print "   " $0 }
+				f && /^(config|menuconfig) / && $0 != s { exit }
+			' tmp/.config-package.in | head -10
+		else
+			echo "tmp/.config-package.in 里没有这个符号 ⇒ 包根本没被 feeds 装进来"
+			ls -d package/feeds/*/"$p" 2>/dev/null || echo "   （package/feeds/*/$p 不存在）"
+		fi
+	done
+	exit 1
+fi
+
+echo
+echo "-- 插件已全部落到 .config"
+for p in $wanted_pkgs; do echo "   $p"; done
+
+set -- $wanted_pkgs
+echo "-- 校验通过：$got 个机型 + u-boot hinlink-h68k-rk3568 + $# 个插件包"

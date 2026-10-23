@@ -1,6 +1,7 @@
 # H68K 固件自动编译
 
-用 GitHub Actions 编译 **HinLink H68K** 的 ImmortalWrt 固件，编完推送到
+用 GitHub Actions 编译 **HinLink H68K 全系**（5 个变体）的 ImmortalWrt 固件，
+预装 PassWall 2 / Nikki / OpenClash / DiskMan，编完推送到
 [Zhaoge5766/H68K](https://github.com/Zhaoge5766/H68K)。
 
 ## 用的什么源码
@@ -23,14 +24,53 @@ H68K 专属的那部分，在 CI 里现场注入。注入了什么：
 
 注入逻辑在 `scripts/inject-hinlink.py`，只有标准库依赖。
 
+## 机型
+
+全系 5 个，一次编完（**共用同一份内核和同一个 u-boot 变体**，只多拼几次镜像）：
+
+| `devices` 里的名字 | 机器 |
+| --- | --- |
+| `h68k-a-b` | A/B 板（2022，双千兆 2 口）+ SATA |
+| `h68k-a-b-usb` | A/B 板，USB3.0 |
+| `h68k-c-d-f` | C/D/F 板（2022~2023.4，四网口）+ SATA |
+| `h68k-c-d-f-usb` | C/D/F 板，USB3.0 |
+| `h68k-new` | 新机器（2023 末~2024），SATA 与 USB3.0 可同时用 |
+
+无后缀 = SATA，`-usb` = USB3.0：RK3568 上 sata0 与 USB3.0 抢同一颗 combphy0，
+硬件二选一，所以老机器拆成两个变体。也可以直接写完整 device 名
+（`hinlink_opc-h68k-new`）。
+
+## 预装的插件
+
+| `plugins` 里的名字 | 包含的包 | 来源 |
+| --- | --- | --- |
+| `passwall2` | `luci-app-passwall2` | `Openwrt-Passwall/openwrt-passwall2` |
+| `nikki` | `luci-app-nikki` + `nikki` + `mihomo-meta` | `nikkinikki-org/OpenWrt-nikki` |
+| `openclash` | `luci-app-openclash` | 官方 luci feed 自带 |
+| `diskman` | `luci-app-diskman` | 官方 luci feed 自带 |
+
+它们的**依赖**（`xray-core` / `sing-box` / `chinadns-ng` / `geoview` / `tcping` /
+`lyaml` / `v2ray-geodata` / `haproxy` / `ruby` / `yq` / `parted` / `exfatprogs` …）
+官方 packages feed 里都有，版本也对得上（`geoview` 两边都是 0.2.8），所以只加
+"没有的那部分" feed。`dnsmasq-full` 本来就是 `DEVICE_TYPE=router` 的默认包，
+OpenClash 要的 ipset / nftset 能力直接可用。
+
+两点注意：
+
+- **SSR 被关掉了**：passwall2 的 `INCLUDE_ShadowsocksR_Libev_Client` 默认开，
+  但 `shadowsocksr-libev` 只在 `openwrt-passwall-packages` 里，而那个 feed
+  不能加（见下面第 6 条）。`diy-part2.sh` 会自动把这个开关写死为 off。
+- **三个代理只能开一个**：OpenClash、PassWall 2、Nikki 都会接管 DNS 和
+  nftables，同时开会互相打架。装在一起是为了随时换，不是为了一起跑。
+
 ## 目录
 
 ```
 .github/workflows/build-h68k.yml   工作流
 scripts/inject-hinlink.py          适配层注入（含各类校验）
-configs/h68k.config                编译种子配置（只管目标和机型）
-diy-part1.sh                       feeds 之前的自定义钩子
-diy-part2.sh                       feeds 之后：清同名 feed 包 + 生成 .config + defconfig
+configs/h68k.config                编译种子配置（只钉平台，机型/插件由脚本管）
+diy-part1.sh                       feeds 之前：加插件 feed + 改源码字面量
+diy-part2.sh                       feeds 之后：清同名 feed 包 + 选机型 + 开插件 + defconfig
 ```
 
 ## 怎么用
@@ -38,30 +78,31 @@ diy-part2.sh                       feeds 之后：清同名 feed 包 + 生成 .c
 推到 `Zhaoge5766/H68K` 之后：
 
 - **手动**：Actions → Build H68K → Run workflow。可以填
-  `iwrt_ref`（官方源码分支）、`overlay_ref`（适配层分支）、`devices`、`publish`。
+  `iwrt_ref`（官方源码分支）、`overlay_ref`（适配层分支）、`devices`、`plugins`、`publish`。
 - **定时**：每周六 04:00（北京时间）跟一次上游。
 - **推送**：改到工作流 / `scripts/` / `configs/` / `diy-part*.sh` 时自动跑一次。
+
+两个输入留空就是全系 / 全插件：
+
+```
+devices:  h68k-a-b h68k-a-b-usb h68k-c-d-f h68k-c-d-f-usb h68k-new
+plugins:  passwall2 nikki openclash diskman
+```
+
+想只编一个机型：`devices` 填 `h68k-new`。想一个插件都不加：`plugins` 填 `none`。
 
 不需要配任何 secret —— 工作流就在 `Zhaoge5766/H68K` 里，用的是内置
 `GITHUB_TOKEN`（已声明 `permissions: contents: write`）。要推到别的仓库才需要
 配 `PUSH_TOKEN`。
 
-### 机型
-
-`devices` 留空 = 只编 `h68k-new`。给多个则一次编完（共用内核和 rootfs）：
-
-```
-h68k-a-b  h68k-a-b-usb  h68k-c-d-f  h68k-c-d-f-usb  h68k-new
-```
-
-设备名是 `hinlink_opc-h68k-*`（命名约定：无后缀 = SATA，`-usb` = USB3.0；
-RK3568 上 sata0 和 USB3.0 抢同一颗 combphy0，硬件二选一，所以是两个变体）。
-也可以直接写完整 device 名。
+首次全量编译（无缓存、5 机型 + 4 插件，含 ruby / sing-box / xray / mihomo 的
+编译）大约 2.5~3.5 小时；有 `dl/` + ccache 缓存后第二次快很多。
 
 ## 产物在哪
 
 - **Release**：`https://github.com/Zhaoge5766/H68K/releases` —— 每次一个 tag
-  （`h68k-YYYYMMDD-<run号>`），带镜像 + `.manifest` + `.buildinfo` + `sha256sums.txt`。
+  （`h68k-YYYYMMDD-<run号>`），带 5 个机型各自的镜像 + `.manifest` + `.buildinfo`
+  + `sha256sums.txt` + 机型对照表。
 - **`firmware` 分支**：只保留最近一次，单提交强推，仓库不会膨胀，`main` 不受影响。
 - **Actions Artifacts**：保留 30 天。
 
@@ -72,7 +113,10 @@ sysupgrade -n xxx-squashfs-sysupgrade.img.gz      # 已经是本固件
 # 原厂首次刷：用 -factory.img.gz，按机型走线刷 / TF 卡刷
 ```
 
-首次进系统 LAN 口 `192.168.100.1`，无密码；5G 模组控制面板在「网络 → 5G复位」。
+文件名里的机型段要和机器对上（`hinlink_opc-h68k-a-b` 与 `hinlink_opc-h68k-a-b-usb`
+是两台机器，别刷错）。首次进系统 LAN 口 `192.168.100.1`，无密码；5G 模组控制
+面板在「网络 → 5G复位」；插件在「服务 → PassWall 2 / Nikki / OpenClash」和
+「系统 → 磁盘管理」。
 
 ## 本地复现
 
@@ -82,8 +126,10 @@ git clone --depth 1 https://github.com/Beaverfffan/immortalwrt-hinlink.git overl
 python3 scripts/inject-hinlink.py --overlay overlay --tree immortalwrt
 
 cd immortalwrt
+bash ../diy-part1.sh                    # 要 feed 文件里的相对路径，得在树根跑
 ./scripts/feeds update -a && ./scripts/feeds install -a
-DEVICES="h68k-new" CONFIG_SEED=../configs/h68k.config bash ../diy-part2.sh
+DEVICES="h68k-new" PLUGINS="passwall2 nikki openclash diskman" \
+  CONFIG_SEED=../configs/h68k.config bash ../diy-part2.sh
 make -j$(nproc) download && make -j$(nproc)
 ```
 
@@ -99,7 +145,7 @@ sudo apt install build-essential clang flex bison g++ gawk gettext \
   file wget bzip2 patch perl time device-tree-compiler bc
 ```
 
-## 五个踩过的坑（都已写进脚本，改之前先读）
+## 七个踩过的坑（都已写进脚本，改之前先读）
 
 **1. `board.d` 只能合并，不能覆盖。**
 官方 `01_leds` / `02_network` 里已经有几十个机型的 case 分支，整文件覆盖会把它们
@@ -127,6 +173,22 @@ sudo apt install build-essential clang flex bison g++ gawk gettext \
 **5. `-factory` 和 `-sysupgrade` 别搞混。**
 原厂固件第一次刷要用 `-factory.img.gz`（走线刷 / TF 卡），已经在跑本固件的机器
 用 `-sysupgrade.img.gz` 直接升级。两个都在 Release 里。
+
+**6. 别把 `openwrt-passwall-packages` 整个 feed 加进来。**
+它 19 个包里 18 个与官方 `packages` feed 同名（`xray-core`、`sing-box`、
+`chinadns-ng`、`geoview`、`tcping`、`v2ray-geodata` …）。同名 = 同
+`PKG_BUILD_DIR` = 并行编译互相踩 —— 之前的 `aic8800` 就是这么炸的
+（`ERROR: package/beaverfffan/aic8800 failed to build`，真报错藏在
+`logs/package/*/*/compile.txt` 里）。官方那份版本一样新，只缺
+`shadowsocksr-libev`，代价是 passwall2 少一个 SSR 协议。
+
+**7. `mihomo` 是虚拟包，不能直接 `=y`。**
+`nikki` 的依赖写的是 `+mihomo`，但 `mihomo` 由 `mihomo-meta` / `mihomo-alpha`
+两个真包 `PROVIDES` 且互相 `CONFLICTS`。只写 `PACKAGE_nikki=y` 的话依赖判定失败，
+`make defconfig` **静默丢弃**这两个包（不报错，只是变成一个 `# … is not set`），
+最后编出来的固件里没有 Nikki，也没有任何报错。所以脚本里显式选 `mihomo-meta`
+（稳定版，从 Go 源码编；`mihomo-alpha` 是 alpha 分支），defconfig 之后再逐个
+回查一遍，缺一个就 fail。
 
 ## 用 `-full` 整树编不行吗
 
