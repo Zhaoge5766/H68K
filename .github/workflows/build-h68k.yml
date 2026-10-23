@@ -209,17 +209,17 @@ jobs:
             exit 1
           fi
 
+      # BUILD_LOG=1 是关键：不加它时，-j 并行下每个子目标的输出会被
+      # log_make 吞掉（build.log 里只剩 "make[3] -C xxx compile" 这种
+      # 进度行），镜像阶段一炸就是一句 "ERROR: target/linux failed to
+      # build."，一行真实报错都拿不到。加上它，每个子目标都会留一份
+      # logs/<path>/<target>.txt。
       - name: 编译固件
         working-directory: ${{ env.TREE }}
         run: |
           set -o pipefail
-          make -j"$(nproc)" 2>&1 | tee build.log
+          make -j"$(nproc)" BUILD_LOG=1 2>&1 | tee build.log
 
-      # 包级别的真实报错不在 build.log 里（-j 并行时 OpenWrt 把每个包的输出
-      # 写进 logs/package/<feed>/<pkg>/compile.txt），所以这里两头都抓：
-      #   1. 打印所有含 error 的 compile.txt
-      #   2. 用 V=s 单编失败的包 —— 此时工具链已经在这个 workspace 编好了，
-      #      只需重建那一个包，几十秒就能把完整报错打到日志里
       - name: 失败摘要
         if: failure()
         continue-on-error: true
@@ -230,28 +230,34 @@ jobs:
           grep -nE 'ERROR:|Error [0-9]|is missing|No rule to make target|fatal error|undefined reference' build.log 2>/dev/null | tail -40
 
           echo
-          echo "=========== 失败的包 ==========="
+          echo "=========== 失败的子目标 ==========="
           failed=$(grep -oE "ERROR: [^ ]+ failed to build" build.log 2>/dev/null | awk '{print $2}')
-          echo "${failed:-（build.log 里没抓到，见下方 compile.txt）}"
+          echo "${failed:-（build.log 里没抓到）}"
 
           echo
-          echo "=========== compile.txt 里的报错 ==========="
-          for f in $(ls logs/package/*/*/compile.txt 2>/dev/null); do
-            if grep -qiE "error|Error [0-9]|No such file|Permission denied" "$f"; then
-              echo "----- $f -----"
-              grep -nE -i "error|Error [0-9]|No such file|Permission denied|Hunk .* FAILED|patch" "$f" | tail -25
-            fi
+          echo "=========== 磁盘 ==========="
+          df -h / /tmp 2>/dev/null | head -5
+
+          echo
+          echo "=========== logs/ 结构（前 40 行）==========="
+          find logs -maxdepth 3 2>/dev/null | head -40
+
+          echo
+          echo "=========== 所有 logs/*.txt 里含报错的行 ==========="
+          find logs -name '*.txt' 2>/dev/null | while read -r f; do
+            grep -qE -i "error|Error [0-9]|No such file|Cannot install|Permission denied" "$f" || continue
+            echo "----- $f -----"
+            grep -nE -i "error|Error [0-9]|No such file|Cannot install|Permission denied|Hunk .* FAILED" "$f" | tail -25
           done
 
           echo
-          echo "=========== 逐个包的 compile.txt 末尾（有内容的才打）==========="
-          for f in $(ls logs/package/*/*/compile.txt 2>/dev/null); do
-            [ -s "$f" ] || continue
-            echo "----- $f (最后 15 行) -----"
-            tail -15 "$f"
+          echo "=========== target/linux 的日志末尾 ==========="
+          for f in $(find logs/target -name '*.txt' 2>/dev/null); do
+            echo "----- $f (最后 40 行) -----"
+            tail -40 "$f"
           done
 
-      - name: 定位失败包（V=s 重编，工具链已就绪）
+      - name: 定位失败步骤（V=s 重跑，工具链已就绪）
         if: failure()
         continue-on-error: true
         working-directory: ${{ env.TREE }}
@@ -259,16 +265,22 @@ jobs:
           set +e
           failed=$(grep -oE "ERROR: [^ ]+ failed to build" build.log 2>/dev/null | awk '{print $2}' | head -1)
           if [ -z "$failed" ]; then
-            echo "没解析出失败包名，跳过"
+            echo "没解析出失败目标，跳过"
             exit 0
           fi
-          # 日志里已经是完整路径（package/beaverfffan/aic8800），别再补 package/
+          # 日志里已经是完整路径：package/beaverfffan/aic8800 / target/linux
           case "$failed" in
             package/*|feeds/*) target="$failed/compile" ;;
+            target/*)          target="$failed/install" ;;   # 镜像阶段
             *)                 target="package/$failed/compile" ;;
           esac
-          echo ">>> 用 V=s 重编 $target（工具链已在，只重编这一个包）"
-          make "$target" V=s -j1 2>&1 | tail -150
+          echo ">>> 用 V=s 重跑 $target（编译产物都在，只重跑这一步）"
+          echo ">>> 镜像阶段通常 1~3 分钟，报错会直接打在这里"
+          make "$target" V=s -j1 2>&1 | tail -200
+
+          echo
+          echo "=========== 镜像目录 ==========="
+          ls -l bin/targets/rockchip/armv8/ 2>/dev/null | head -30
 
       - name: 上传失败日志
         if: failure()

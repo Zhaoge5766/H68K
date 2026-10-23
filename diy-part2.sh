@@ -4,12 +4,13 @@
 #
 # 位置：./scripts/feeds update -a && ./scripts/feeds install -a → 本脚本
 #
-# 它做五件事：
+# 它做六件事：
 #   1. 删掉与本地包同名的 feed 软链（详见下方注释，这步不能省）
 #   2. 用 configs/h68k.config 作种子
 #   3. 按 $DEVICES 把机型符号打开
 #   4. 按 $PLUGINS 把插件包打开（含依赖校验）
 #   5. make defconfig，并校验机型数 / u-boot 变体 / 插件是否真被接受
+#   6. 预检机型自带的 DEVICE_PACKAGES 是否存在（不然要等镜像阶段才炸）
 #
 # 环境变量：
 #   DEVICES      空格分隔的机型短名，默认全系 5 个
@@ -69,6 +70,7 @@ dev_symbol() {
 }
 
 want=0
+SEL_SYMS=""
 for short in $DEVICES; do
 	sym=$(dev_symbol "$short")
 	if [ -z "$sym" ]; then
@@ -86,6 +88,7 @@ for short in $DEVICES; do
 	sed -i "/^${key}=/d;/^# ${key}[= ]/d" .config
 	echo "${key}=y" >> .config
 	want=$((want + 1))
+	SEL_SYMS="$SEL_SYMS $sym"
 	echo "   选中 $short -> $sym"
 done
 
@@ -232,6 +235,63 @@ fi
 echo
 echo "-- 插件已全部落到 .config"
 for p in $wanted_pkgs; do echo "   $p"; done
+
+# ---------------------------------------------------------------- 6
+# 机型自带包（DEVICE_PACKAGES）预检
+#
+# 这一步是防"编译 2.5 小时后在 target/linux install 阶段炸掉、且一行报错都
+# 看不到"的：机型的 DEVICE_PACKAGES 里只要有一个包名在树里不存在，
+# `make defconfig` 会**静默丢弃**那个符号（不报错），包就不会被编；
+# 到镜像阶段 opkg 才报 "Cannot install package xxx"，而那行输出在
+# BUILD_LOG 没开的时候是拿不到的。
+#
+# 判据分两档：
+#   · tmp/.config-package.in 里连符号都没有  → 包名根本不存在，100% 会炸 ⇒ 直接 fail
+#   · 符号在但没被选上（=y/m 都没有）        → 可能是被 Provides 的虚拟包，
+#                                              只警告，交给镜像阶段判定
+echo "-- 机型自带包预检"
+if [ -f tmp/.targetinfo ]; then
+	for sym in $SEL_SYMS; do
+		# .targetinfo 里的 profile 键有的版本带 DEVICE_ 前缀，两种都认
+		pkgs=$(awk -v a="DEVICE_${sym}" -v b="${sym}" '
+			/^Target-Profile:/ {
+				v = $0
+				sub(/^Target-Profile:[ \t]*/, "", v)
+				f = (v == a || v == b)
+				next
+			}
+			f && /^Target-Profile-Packages:/ {
+				sub(/^Target-Profile-Packages:[ \t]*/, ""); print; exit
+			}
+			f && /^Target-Profile-/ { exit }
+		' tmp/.targetinfo)
+		if [ -z "$pkgs" ]; then
+			echo "::warning::tmp/.targetinfo 里没找到 ${sym} 的包列表，跳过预检"
+			continue
+		fi
+		nope=""
+		off=""
+		for p in $pkgs; do
+			case "$p" in -*) continue ;; esac       # 前缀 - 表示从默认包集里去掉
+			if ! grep -qx "config PACKAGE_${p}" tmp/.config-package.in 2>/dev/null; then
+				nope="$nope $p"
+			elif ! grep -qE "^CONFIG_PACKAGE_${p}=[ym]\$" .config; then
+				off="$off $p"
+			fi
+		done
+		printf '   %-24s 共 %s 个包\n' "${sym#hinlink_opc-}" "$(echo "$pkgs" | wc -w)"
+		if [ -n "$nope" ]; then
+			echo "::error::${sym} 的 DEVICE_PACKAGES 里有树里不存在的包：${nope# }"
+			echo "  （这些包名写错了或者上游删了，镜像阶段一定会失败）"
+			exit 1
+		fi
+		if [ -n "$off" ]; then
+			echo "::warning::${sym} 这些包没被选中（可能被 Provides 顶替）：${off# }"
+		fi
+	done
+else
+	echo "::warning::没有 tmp/.targetinfo，跳过机型包预检"
+fi
 
 set -- $wanted_pkgs
 echo "-- 校验通过：$got 个机型 + u-boot hinlink-h68k-rk3568 + $# 个插件包"
