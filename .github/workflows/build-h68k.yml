@@ -276,7 +276,9 @@ jobs:
           esac
           echo ">>> 用 V=s 重跑 $target（编译产物都在，只重跑这一步）"
           echo ">>> 镜像阶段通常 1~3 分钟，报错会直接打在这里"
-          make "$target" V=s -j1 2>&1 | tail -200
+          # BUILD_LOG 必须给：不给的话子目标的输出会被 log_make 吞掉，
+          # V=s 也救不回来（它只管 echo，不管重定向）
+          make "$target" V=s -j1 BUILD_LOG=1 2>&1 | tail -200
 
           echo
           echo "=========== 镜像目录 ==========="

@@ -236,6 +236,20 @@ echo
 echo "-- 插件已全部落到 .config"
 for p in $wanted_pkgs; do echo "   $p"; done
 
+# rootfs 分区够不够大
+#   ext4 根镜像按 CONFIG_TARGET_ROOTFS_PARTSIZE 定长做（make_ext4fs -l N M），
+#   默认 160 MiB。装了几个代理插件之后未压缩 rootfs 轻松超 200 MiB，
+#   镜像阶段就会在**第一台机器**上报 Not enough space 而整体失败 —— 而且
+#   这个错在 BUILD_LOG 没开时是抓不到的，只能白跑几小时。
+rfs=$(sed -n 's/^CONFIG_TARGET_ROOTFS_PARTSIZE=//p' .config | tr -d '"')
+rfs=${rfs:-160}
+echo "   rootfs 分区：${rfs} MiB"
+if [ -n "$PLUGINS" ] && [ "$rfs" -lt 512 ] 2>/dev/null; then
+	echo "::error::rootfs 分区只有 ${rfs} MiB —— 装了 ${PLUGINS} 之后 ext4 根镜像会超限"
+	echo "（改 configs/h68k.config 里的 CONFIG_TARGET_ROOTFS_PARTSIZE，建议 1024）"
+	exit 1
+fi
+
 # ---------------------------------------------------------------- 6
 # 机型自带包（DEVICE_PACKAGES）预检
 #
