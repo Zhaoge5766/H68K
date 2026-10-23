@@ -189,9 +189,3 @@ sudo apt install build-essential clang flex bison g++ gawk gettext \
 最后编出来的固件里没有 Nikki，也没有任何报错。所以脚本里显式选 `mihomo-meta`
 （稳定版，从 Go 源码编；`mihomo-alpha` 是 alpha 分支），defconfig 之后再逐个
 回查一遍，缺一个就 fail。
-
-## 用 `-full` 整树编不行吗
-
-行，但那是 Beaverfffan 维护的一棵**完整 immortalwrt 树**（内核、uboot、通用包全是他
-fork 那份的），上游一更新就得等他把 rebase 做完。这套流程里官方源码只取 master 的
-当次提交，适配层单独更新，两边解耦。
