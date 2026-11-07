@@ -1,0 +1,11 @@
+9f5a2e7a7003f00575f49134669cf8838bb51775783ee768a38294ed1229a06d  immortalwrt-rockchip-armv8-hinlink_opc-h68k-a-b-ext4-sysupgrade.img.gz
+492431fc284e0502318c1ed75f11b7836bec62dbdf1b9eedb07f334c4757c0fa  immortalwrt-rockchip-armv8-hinlink_opc-h68k-a-b-squashfs-sysupgrade.img.gz
+8099d04bb1a53585a074a975a53d79b9d848e5595ea42eeadefc4329f648d2fd  immortalwrt-rockchip-armv8-hinlink_opc-h68k-a-b-usb-ext4-sysupgrade.img.gz
+01cfbf21fc97c8af9bc56a1d26a2b198aafec7811ec1094e06aa14d09131af3f  immortalwrt-rockchip-armv8-hinlink_opc-h68k-a-b-usb-squashfs-sysupgrade.img.gz
+26950e872cf254775f2f054a4901a8fc99f0ba36b35354a2bb81075a4b9d5a30  immortalwrt-rockchip-armv8-hinlink_opc-h68k-c-d-f-ext4-sysupgrade.img.gz
+1e6c7b50b45bf078806e5dcc11820b7c6517eeb20ca1ba6e524df649299136c0  immortalwrt-rockchip-armv8-hinlink_opc-h68k-c-d-f-squashfs-sysupgrade.img.gz
+0ce200a6aa410f1b9ed456ab02d3ff442183acf8cd90dce1c5aefc6492370354  immortalwrt-rockchip-armv8-hinlink_opc-h68k-c-d-f-usb-ext4-sysupgrade.img.gz
+9c1f5329b6a959fdcba3c4c64b725af237680bb3f2d726567a273b537dcb60ba  immortalwrt-rockchip-armv8-hinlink_opc-h68k-c-d-f-usb-squashfs-sysupgrade.img.gz
+3862acb0a30417950189d34cb99e0af1f2be37a40467107dd04092d5c24d1746  immortalwrt-rockchip-armv8-hinlink_opc-h68k-new-ext4-sysupgrade.img.gz
+471ed5db98ee8704ce018287bad130014f7c4aa24c96a532103b3fd6357f8a16  immortalwrt-rockchip-armv8-hinlink_opc-h68k-new-squashfs-sysupgrade.img.gz
+bdefb0c3252387af4bb2ff67369ea4331fcea1e0c3e51705630a1179b13444f2  profiles.json
